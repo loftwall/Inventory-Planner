@@ -32,3 +32,6 @@ Verification completed here
 Portable UI build, server startup on localhost, report access denial without a session, material solver execution, planning/work-order/reorder/yield checks. Replit import and Linux dependency installation have not been executed yet. This does not claim production readiness.
 
 The original local planner is unchanged and remains available at http://127.0.0.1:8766/.
+
+Usage history
+Each refresh also reads 25 months of usage from NetSuite (read-only SuiteQL): sales-order item fulfillments and work-order component consumption (WO issues and backflushed completions), grouped by month and rolled up to purchasing parents with item yields. The Usage history view averages daily use over the last 3/6/12/24 complete months and projects it across the planning horizon (projected use, days of cover, projected balance). It is a reference only; purchase suggestions still come from open orders, incoming supply and reorder points. If a history query fails, the last successful history read is kept (data/usage-raw.json) and the refresh still completes.
