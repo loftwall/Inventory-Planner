@@ -25,20 +25,22 @@ export async function pullCatalog(r,onProgress){
 }
 export const usageHistoryMonths=25;
 const excludedLineTypes="('ShipItem','Discount','Subtotal','Markup','Description','EndGroup','Group')";
-// Read-only monthly usage: sales-order shipments (not transfer shipments) and work-order component consumption.
+// Read-only monthly usage: quantities shipped on Pending Billing (E/F) and Billed (G) sales orders, plus
+// work-order component consumption. Sales usage is dated by the order ship date (order date when blank).
 // Each source keeps its last successful read if a query fails, so a history problem never blocks the refresh.
 export async function pullUsageHistory(r,catalog,previousRaw,onProgress){
- const months=usageMonths(today().slice(0,7),usageHistoryMonths),start=months[0]+'-01',month="TO_CHAR(t.trandate,'YYYY-MM')";
- const sales=link=>`SELECT ${month} AS month,l.item,SUM(ABS(l.quantity)) AS qty FROM transaction t INNER JOIN transactionline l ON l.transaction=t.id INNER JOIN transaction s ON s.id=${link} WHERE t.type='ItemShip' AND s.type='SalesOrd' AND t.trandate>=TO_DATE('${start}','YYYY-MM-DD') AND l.mainline='F' AND l.taxline='F' AND l.item IS NOT NULL AND l.itemtype NOT IN ${excludedLineTypes} GROUP BY ${month},l.item ORDER BY ${month},l.item`;
+ const months=usageMonths(today().slice(0,7),usageHistoryMonths),start=months[0]+'-01',month="TO_CHAR(t.trandate,'YYYY-MM')",salesDate='NVL(t.shipdate,t.trandate)',salesMonth=`TO_CHAR(${salesDate},'YYYY-MM')`;
+ const sales=`SELECT ${salesMonth} AS month,l.item,SUM(ABS(NVL(l.quantityshiprecv,l.quantity))) AS qty FROM transaction t INNER JOIN transactionline l ON l.transaction=t.id WHERE t.type='SalesOrd' AND t.status IN ('E','F','G') AND ${salesDate}>=TO_DATE('${start}','YYYY-MM-DD') AND l.mainline='F' AND l.taxline='F' AND l.item IS NOT NULL AND l.itemtype NOT IN ${excludedLineTypes} GROUP BY ${salesMonth},l.item ORDER BY ${salesMonth},l.item`;
  const work=`SELECT ${month} AS month,l.item,SUM(ABS(l.quantity)) AS qty FROM transaction t INNER JOIN transactionline l ON l.transaction=t.id WHERE t.type IN ('WOIssue','WOCompl') AND (t.type='WOIssue' OR l.quantity<0) AND t.trandate>=TO_DATE('${start}','YYYY-MM-DD') AND l.mainline='F' AND l.item IS NOT NULL AND l.itemtype IN ('InvtPart','Assembly') GROUP BY ${month},l.item ORDER BY ${month},l.item`;
- const read=async(queries,label,source)=>{let error;for(const q of queries){try{return {rows:(await all(r,q,onProgress,label)).map(x=>({month:x.month,item:Number(x.item),qty:Number(x.qty),source})),readAt:new Date().toISOString(),error:null}}catch(e){error=e}}
-  const kept=previousRaw?.[source];return {rows:kept?.rows||[],readAt:kept?.readAt||null,error:error.message}};
- onProgress?.('Reading shipment history');
- const salesRaw=await read([sales('l.createdfrom'),sales('t.createdfrom')],'Shipment history','sales');
+ const read=async(q,label,source,basis)=>{try{return {basis,rows:(await all(r,q,onProgress,label)).map(x=>({month:x.month,item:Number(x.item),qty:Number(x.qty),source})),readAt:new Date().toISOString(),error:null}}catch(error){
+  // A kept read is reused only if it came from the same source definition.
+  const kept=previousRaw?.[source]?.basis===basis?previousRaw[source]:null;return {basis,rows:kept?.rows||[],readAt:kept?.readAt||null,error:error.message}}};
+ onProgress?.('Reading billed sales order history');
+ const salesRaw=await read(sales,'Sales order history','sales','salesOrders:pendingBilling,billed');
  onProgress?.('Reading work-order consumption history');
- const workRaw=await read([work],'Work-order history','workOrder');
+ const workRaw=await read(work,'Work-order history','workOrder','workOrders:consumption');
  const raw={sales:salesRaw,workOrder:workRaw},rolled=rollupUsage([...salesRaw.rows,...workRaw.rows],catalog,months);
- return {raw,history:{...rolled,from:start,through:today(),sources:{sales:{readAt:salesRaw.readAt,error:salesRaw.error},workOrders:{readAt:workRaw.readAt,error:workRaw.error}}}};
+ return {raw,history:{...rolled,from:start,through:today(),sources:{sales:{readAt:salesRaw.readAt,error:salesRaw.error,rows:salesRaw.rows.length},workOrders:{readAt:workRaw.readAt,error:workRaw.error,rows:workRaw.rows.length}}}};
 }
 export async function pullReport({updateItems=false,readSettings=true,onProgress}={}){
  await mkdir(stateDir,{recursive:true,mode:0o700});const r=await reader();let previous;
