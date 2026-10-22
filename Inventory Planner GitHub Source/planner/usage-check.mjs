@@ -1,0 +1,16 @@
+import assert from 'node:assert/strict';
+import {usageMonths,usageMonthDays,usageParentQty,rollupUsage,usageForecast} from './usage.mjs';
+assert.deepEqual(usageMonths('2026-02',4),['2025-11','2025-12','2026-01','2026-02']);assert.equal(usageMonthDays('2024-02'),29);
+assert.equal(usageParentQty(10,[{yield:0.25}]),2.5);assert.equal(usageParentQty(10,[{yield:2}]),20);assert.equal(usageParentQty(12,[{yield:0.5},{yield:3}]),18);
+const catalog=[{id:1,sku:'RAW'},{id:2,sku:'CUT',parent:'RAW',parentInternalId:1,yield:0.25},{id:3,sku:'LOST',parent:'MISSING'}];
+const months=usageMonths('2026-10',4);
+const h=rollupUsage([{month:'2026-07',item:2,qty:8,source:'sales'},{month:'2026-07',item:1,qty:3,source:'workOrder'},{month:'2026-08',item:1,qty:5,source:'sales'},{month:'2026-10',item:1,qty:4,source:'sales'},{month:'2025-01',item:1,qty:99,source:'sales'},{month:'2026-08',item:3,qty:1,source:'sales'},{month:'2026-08',item:9,qty:1,source:'sales'}],catalog,months);
+assert.deepEqual(h.materials['item-1'],{sales:[2,5,0,4],workOrders:[3,0,0,0]});assert.equal(h.materials['item-2'],undefined);assert.equal(h.issues.length,2);
+let f=usageForecast(h,'item-1',{lookback:3,days:30,currentMonth:'2026-10'});
+assert.equal(f.months,3);assert.equal(f.total,10);assert.equal(f.monthToDate,4);assert.equal(f.forecast,Math.ceil(10/(31+31+30)*30));assert.equal(f.trend,null);
+f=usageForecast(h,'item-1',{lookback:12,days:30,currentMonth:'2026-10'});assert.equal(f.months,3);
+f=usageForecast(h,'item-none',{lookback:3,days:30,currentMonth:'2026-10'});assert.equal(f.total,0);assert.equal(f.forecast,0);
+assert.equal(usageForecast(null,'item-1',{lookback:3,days:30,currentMonth:'2026-10'}).forecast,null);
+const trendMonths=usageMonths('2026-07',7),t={months:trendMonths,materials:{a:{sales:[10,10,10,15,15,15,0],workOrders:[0,0,0,0,0,0,0]}}};
+assert.equal(usageForecast(t,'a',{lookback:6,days:30,currentMonth:'2026-07'}).trend,0.5);
+console.log('Passed: usage months, yield conversion to parents, unmatched items reported, partial month excluded from averages, projection and trend.');

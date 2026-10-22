@@ -6,6 +6,7 @@ import {bucket,plan} from '../planner/core.mjs';
 import {pullSettings,pullSavedSearchSettings} from './settings.mjs';
 import {optimalPacking} from './optimal-packing.mjs';
 import {compareItems} from '../planner/sync.mjs';
+import {usageMonths,rollupUsage} from '../planner/usage.mjs';
 export const root=fileURLToPath(new URL('../',import.meta.url));
 export const stateDir=resolve(process.env.PLANNER_DATA_DIR||root+'/data');
 const num=v=>v===null||v===undefined||v===''?null:Number(v);
@@ -21,6 +22,23 @@ export async function pullCatalog(r,onProgress){
  const after=await count();if(before!==after||raw.length!==after||new Set(raw.map(i=>i.id)).size!==after)throw new Error('Item list changed during retrieval or was incomplete. Previous data retained.');
  const items=raw.map(i=>({id:Number(i.id),sku:i.itemid,display:i.displayname||'',description:i.description||'',type:i.itemtype,parent:i.parentname||'',parentInternalId:num(i.custitemparentitem),yield:num(i.custitemparentyield),line:i.productline||'Unassigned',active:!truth(i.isinactive),onHand:num(i.totalquantityonhand),price:num(i.lastpurchaseprice)}));
  return {items,complete:true,filtered:false,scope:'3646375:inventory-planner:all-items',total:after};
+}
+export const usageHistoryMonths=25;
+const excludedLineTypes="('ShipItem','Discount','Subtotal','Markup','Description','EndGroup','Group')";
+// Read-only monthly usage: sales-order shipments (not transfer shipments) and work-order component consumption.
+// Each source keeps its last successful read if a query fails, so a history problem never blocks the refresh.
+export async function pullUsageHistory(r,catalog,previousRaw,onProgress){
+ const months=usageMonths(today().slice(0,7),usageHistoryMonths),start=months[0]+'-01',month="TO_CHAR(t.trandate,'YYYY-MM')";
+ const sales=link=>`SELECT ${month} AS month,l.item,SUM(ABS(l.quantity)) AS qty FROM transaction t INNER JOIN transactionline l ON l.transaction=t.id INNER JOIN transaction s ON s.id=${link} WHERE t.type='ItemShip' AND s.type='SalesOrd' AND t.trandate>=TO_DATE('${start}','YYYY-MM-DD') AND l.mainline='F' AND l.taxline='F' AND l.item IS NOT NULL AND l.itemtype NOT IN ${excludedLineTypes} GROUP BY ${month},l.item ORDER BY ${month},l.item`;
+ const work=`SELECT ${month} AS month,l.item,SUM(ABS(l.quantity)) AS qty FROM transaction t INNER JOIN transactionline l ON l.transaction=t.id WHERE t.type IN ('WOIssue','WOCompl') AND (t.type='WOIssue' OR l.quantity<0) AND t.trandate>=TO_DATE('${start}','YYYY-MM-DD') AND l.mainline='F' AND l.item IS NOT NULL AND l.itemtype IN ('InvtPart','Assembly') GROUP BY ${month},l.item ORDER BY ${month},l.item`;
+ const read=async(queries,label,source)=>{let error;for(const q of queries){try{return {rows:(await all(r,q,onProgress,label)).map(x=>({month:x.month,item:Number(x.item),qty:Number(x.qty),source})),readAt:new Date().toISOString(),error:null}}catch(e){error=e}}
+  const kept=previousRaw?.[source];return {rows:kept?.rows||[],readAt:kept?.readAt||null,error:error.message}};
+ onProgress?.('Reading shipment history');
+ const salesRaw=await read([sales('l.createdfrom'),sales('t.createdfrom')],'Shipment history','sales');
+ onProgress?.('Reading work-order consumption history');
+ const workRaw=await read([work],'Work-order history','workOrder');
+ const raw={sales:salesRaw,workOrder:workRaw},rolled=rollupUsage([...salesRaw.rows,...workRaw.rows],catalog,months);
+ return {raw,history:{...rolled,from:start,through:today(),sources:{sales:{readAt:salesRaw.readAt,error:salesRaw.error},workOrders:{readAt:workRaw.readAt,error:workRaw.error}}}};
 }
 export async function pullReport({updateItems=false,readSettings=true,onProgress}={}){
  await mkdir(stateDir,{recursive:true,mode:0o700});const r=await reader();let previous;
@@ -76,7 +94,11 @@ export async function pullReport({updateItems=false,readSettings=true,onProgress
  const workOrderReceipts=workOrders.filter(l=>truth(l.mainline)&&!truth(l.isclosed)).map(l=>({id:'wo-'+l.orderid,order:l.tranid,material:'item-'+l.item,ordered:Math.abs(Number(l.quantity)),built:Math.abs(Number(l.quantityshiprecv||0)),qty:Math.max(0,Math.abs(Number(l.quantity))-Math.abs(Number(l.quantityshiprecv||0))),date:date(l.enddate),status:workStatus(l.status),closed:false,live:true})).filter(l=>l.qty>0&&validMaterials.has(l.material));
  const excludedBuilds=workOrders.filter(l=>truth(l.mainline)&&!truth(l.isclosed)&&!validMaterials.has('item-'+l.item));
  if(excludedBuilds.length)throw new Error('Work-order output is a child item; its supply mapping needs review before refreshing');
- const report={scope:cat.scope,catalog:cat.items,materials,lines:[...lineGroups.values()],receipts,workOrderReceipts,workOrdersConnected:true,issues,source:'NetSuite',settingsConnection:cfg.settingsMode||'pending',account:'3646375',refreshedAt:new Date().toISOString(),changeReport,settingsMissing:materials.filter(m=>m.reorder===null).length,sourceCounts:{items:cat.items.length,activeItems:cat.items.filter(i=>i.active).length,salesOrders:new Set(sales.map(l=>l.orderid)).size,uninspectedOrders:new Set(orders.filter(o=>!o.inspected&&!o.closed&&o.qty>o.shipped).map(o=>o.order)).size,rawSalesLines:sales.length,rawPOLines:purchases.length,rawWorkOrderLines:workOrders.length,openWorkOrders:new Set(workOrderReceipts.map(w=>w.order)).size,openPOs:new Set(receipts.map(p=>p.order)).size}};
+ let usageRaw=null;try{usageRaw=JSON.parse(await readFile(stateDir+'/usage-raw.json','utf8'))}catch(e){if(e.code!=='ENOENT')throw e;}
+ const usage=await pullUsageHistory(r,cat.items,usageRaw,onProgress);
+ await writeFile(stateDir+'/usage-raw.json',JSON.stringify(usage.raw),{mode:0o600});
+ const usageHistory={...usage.history,materials:Object.fromEntries(Object.entries(usage.history.materials).filter(([id])=>validMaterials.has(id)))};
+ const report={scope:cat.scope,catalog:cat.items,materials,lines:[...lineGroups.values()],receipts,workOrderReceipts,workOrdersConnected:true,issues,source:'NetSuite',settingsConnection:cfg.settingsMode||'pending',account:'3646375',refreshedAt:new Date().toISOString(),changeReport,usageHistory,settingsMissing:materials.filter(m=>m.reorder===null).length,sourceCounts:{items:cat.items.length,activeItems:cat.items.filter(i=>i.active).length,salesOrders:new Set(sales.map(l=>l.orderid)).size,uninspectedOrders:new Set(orders.filter(o=>!o.inspected&&!o.closed&&o.qty>o.shipped).map(o=>o.order)).size,rawSalesLines:sales.length,rawPOLines:purchases.length,rawWorkOrderLines:workOrders.length,openWorkOrders:new Set(workOrderReceipts.map(w=>w.order)).size,openPOs:new Set(receipts.map(p=>p.order)).size}};
  await mkdir(stateDir+'/history',{recursive:true,mode:0o700});
  const historyName=new Date().toISOString().replace(/[:.]/g,'-');
  await writeFile(stateDir+'/history/'+historyName+'.json',JSON.stringify(report),{mode:0o600});

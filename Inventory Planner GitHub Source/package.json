@@ -9,6 +9,6 @@
   "scripts": {
     "build": "python3 server/build-live.py",
     "start": "node server/server.mjs",
-    "test": "node planner/check.mjs && node planner/rollup-check.mjs && node server/connector-check.mjs && node server/settings-check.mjs && node server/work-order-check.mjs && node server/auth-check.mjs"
+    "test": "node planner/check.mjs && node planner/rollup-check.mjs && node planner/usage-check.mjs && node server/connector-check.mjs && node server/settings-check.mjs && node server/work-order-check.mjs && node server/auth-check.mjs"
   }
 }
